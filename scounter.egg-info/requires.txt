@@ -1,0 +1,10 @@
+instagrapi<3,>=2.5
+requests>=2.28
+
+[dev]
+ruff>=0.4
+mypy>=1.8
+types-requests
+
+[tor]
+PySocks>=1.7

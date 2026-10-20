@@ -1,0 +1,2 @@
+[console_scripts]
+scounter = scounter.cli:main

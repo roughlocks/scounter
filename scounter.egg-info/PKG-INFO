@@ -1,0 +1,254 @@
+Metadata-Version: 2.4
+Name: scounter
+Version: 0.1.0
+Summary: A polite, resumable Instagram media archiver (cookies-only, full-HD).
+Author: scounter contributors
+License: MIT
+Project-URL: Homepage, https://github.com/yourusername/scounter
+Project-URL: Issues, https://github.com/yourusername/scounter/issues
+Keywords: instagram,archiver,scraper,downloader,archive
+Classifier: Development Status :: 4 - Beta
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Information Technology
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Topic :: Security
+Classifier: Topic :: Internet :: WWW/HTTP
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: instagrapi<3,>=2.5
+Requires-Dist: requests>=2.28
+Provides-Extra: tor
+Requires-Dist: PySocks>=1.7; extra == "tor"
+Provides-Extra: dev
+Requires-Dist: ruff>=0.4; extra == "dev"
+Requires-Dist: mypy>=1.8; extra == "dev"
+Requires-Dist: types-requests; extra == "dev"
+Dynamic: license-file
+
+# scounter
+
+A cookies-only, **full-HD** Instagram archiver. It maps out a profile's posts, reels, stories, highlights and tagged posts into a durable manifest, then downloads everything in parallel — and can resolve any downloaded file back to its Instagram URL.
+
+Built on [`instagrapi`](https://github.com/subzeroid/instagrapi) (Instagram's private mobile API) for full-resolution media. Authentication is **cookies-only** — no username/password, no anonymous mode.
+
+> ⚠️ **Disclaimer:** This tool is intended for collecting **publicly available** information from Instagram profiles that you are authorized to access. You are responsible for complying with Instagram's Terms of Service and applicable laws in your jurisdiction. The authors do not condone stalking, harassment, or any unlawful use. Use responsibly.
+
+---
+
+## Features
+
+- **Full-HD everything** — photos, sidecar albums, reels, IGTV, stories, highlights, tagged posts and the profile picture, all at maximum resolution via the private API.
+- **Cookies-only auth** — log in with a `sessionid` cookie (raw, cookie string, or Netscape file). Expired cookies are detected and reported clearly.
+- **Map first, download second** — every item is enumerated into a SQLite manifest (the "blueprint") before any bytes are fetched, so you always know the total and what's missing.
+- **Stories & highlights first** — ephemeral content (vanishes in 24h) is grabbed immediately with light pacing, before the long posts crawl.
+- **Parallel CDN download** — media files are fetched several at once straight from Instagram's CDN (which doesn't rate-limit), so the slow part is fast.
+- **Rate-based AIMD pacing** — a chosen request interval with small jitter on every API call, multiplicative backoff on 429 (additive recovery). Paces against the *account's* budget, which is the binding constraint under cookie auth.
+- **Lossless resume** — the manifest, pagination cursor and pacer state are checkpointed. Re-running picks up exactly where it stopped, and incremental runs bail out after a few pages of already-seen items.
+- **`link` command** — resolve a downloaded file, shortcode or date back to its Instagram URL and local path.
+- **Reports** — `metadata.json` (structured) and `report.md` (human-readable summary with per-category counts and a missing-items diff).
+
+## Install
+
+```bash
+git clone https://github.com/yourusername/scounter.git
+cd scounter
+pip install -r requirements.txt
+pip install -e .
+# To route through Tor (--tor), PySocks is needed:
+pip install -e ".[tor]"
+```
+
+Requires Python 3.10+.
+
+## Getting your `sessionid` cookie
+
+`scounter` is cookies-only. Export the `sessionid` cookie from a browser logged into Instagram:
+
+1. Open Instagram in your browser, log in.
+2. Open DevTools → Application (Chrome) / Storage (Firefox) → Cookies → `https://www.instagram.com`.
+3. Copy the value of the `sessionid` cookie.
+
+Pass it via `--sessionid`, `--cookies` (a `k=v; k=v` string), or `--cookies-file` (a Netscape file exported with an extension like "Get cookies.txt"). You can also set the `SCOUNTER_SESSIONID` / `SCOUNTER_COOKIES` / `SCOUNTER_COOKIES_FILE` env vars.
+
+**Credential-input safety (read this):** the `sessionid` (and the full cookie set) is a complete account-takeover artifact. The three input paths are **not** equally safe:
+
+| Path | Leakage |
+|---|---|
+| `--cookies-file` (Netscape file, `chmod 600`) | **Safest.** Only on disk, restrictable. **Use this by default.** |
+| `SCOUNTER_*` env var | Readable by other local processes via `/proc/<pid>/environ`; on PowerShell it can also land in `ConsoleHost_history.txt` on disk. |
+| `--sessionid` on the command line | Visible to other users via `ps`/process list. scounter warns when this is used. |
+
+> 💡 Use a dedicated/burner account for OSINT work. The verified session is cached to `output/.sessions/settings.json` (mode `0600`) for reuse — never commit it. A second copy is **not** written: instaloader-style `session-<user>` files are not created.
+
+## Quick start
+
+Collect everything from a profile:
+
+```bash
+python -m scounter collect natgeo --sessionid 123456%3AAbCd... --everything
+```
+
+Via env var (great for automation/cron):
+
+```bash
+export SCOUNTER_SESSIONID=123456%3AAbCd...
+python -m scounter collect natgeo --everything
+```
+
+Resume an interrupted run (skips media already on disk):
+
+```bash
+python -m scounter collect natgeo --everything --fast-update
+```
+
+Resolve a downloaded file / shortcode / date to its Instagram URL:
+
+```bash
+python -m scounter link ABC123xyz                       # by shortcode
+python -m scounter link ABC123xyz_20240601_123045.jpg   # by downloaded filename
+python -m scounter link 2024-06-01                      # by date (YYYY-MM-DD / YYYYMMDD / YYYY)
+```
+
+## Usage
+
+```
+python -m scounter collect <target> [options]
+python -m scounter link <query> [--target TARGET] [-o DIR]
+
+collect target          Instagram username or numeric user id
+
+Authentication (cookies-only):
+  --sessionid ID        Instagram 'sessionid' cookie (or SCOUNTER_SESSIONID)
+  --cookies "k=v; ..."   Cookie string; sessionid is extracted (or SCOUNTER_COOKIES)
+  --cookies-file PATH   Netscape cookie file (or SCOUNTER_COOKIES_FILE)
+
+Proxy & network (stable egress — no circuit rotation; see "Network" below):
+  --proxy URL           Route requests through a stable proxy (http://... or socks5h://...).
+                        A residential proxy in the account's region is most reliable.
+  --tor                 Route through a single stable Tor circuit (SOCKS5h port 9050).
+                        For anonymity only; less reliable than a residential IP. Needs `.[tor]`.
+
+Scope:
+  --everything          Collect ALL artifacts
+  --no-posts --no-reels --no-stories --no-highlights --no-tagged
+  --no-profile-pic --no-metadata
+
+Tuning:
+  --fast-update         Skip media already on disk (resume)
+  --max-posts N         Cap posts/reels/tagged enumerated
+  --request-delay SEC   Base interval between API requests; AIMD-adapted on 429 (default: 4)
+  --max-429 N           Stop after N consecutive 429s and checkpoint (default: 5)
+  --max-total-429 N     Run-wide 429 budget (default: 50)
+  --seen-bail N         Incremental run: stop after N consecutive seen items (default: 150)
+  --max-attempts N      Dead-letter a download after N failures (default: 3)
+  --workers N           Parallel CDN download workers (default: 4)
+  -o, --output DIR      Output directory (default: ./output)
+  -v, --verbose         Debug logging
+```
+
+## Output layout
+
+```
+output/<target>/
+├── media/
+│   ├── profile_pic/        profile picture (HD)
+│   ├── posts/              image & album posts      <shortcode>_<YYYYMMDD_HHMMSS>.<ext>
+│   ├── reels/              video posts / reels
+│   ├── stories/            active stories
+│   ├── highlights/<title>/ per-highlight story items
+│   └── tagged/             posts the target is tagged in
+├── manifest.db             SQLite blueprint: every item, its shortcode, date, URLs, download state
+├── metadata.json           structured dump of the profile + collection counts
+├── report.md               human-readable Markdown summary
+└── collection.log          audit log of the run
+```
+
+(Pacer state and the pagination cursor live inside `manifest.db`'s `run_state` table — there is no separate `pacer.json`.)
+
+Filenames embed the shortcode, so `scounter link <filename>` recovers the original `instagram.com/p/<shortcode>/` URL from the name alone.
+
+## How it works
+
+1. **Authenticate** with cookies → instagrapi's private mobile API (full-HD media).
+2. **Stories & highlights first** — grabbed in one tight pass with light pacing, because they expire.
+3. **Enumerate** posts/reels/tagged one API page at a time (~50/page) into the SQLite manifest, checkpointing the pagination cursor. The Media objects already carry HD URLs, so no extra API calls are needed for download. This is ~50× cheaper on the API than download-interleaved paging.
+4. **Download** pending items in parallel from the CDN — HD bytes, no API calls, no rate-limit risk. Stale signed URLs (a resume days later) are refreshed on demand via a paced `media_info` call.
+
+## Network: stable egress (no circuit rotation)
+
+Under cookie auth, your identity to Instagram is the **account + device
+fingerprint**, not the source IP. So rate limiting and integrity scoring are
+keyed on the account, and rotating the IP (e.g. Tor NEWNYM) buys little —
+worse, a single account hopping across many Tor exits reads as an
+**account-compromise signal** and tends to trigger `checkpoint_required`, not a
+429 you can back off from.
+
+**So scounter does not rotate circuits.** Keep egress stable and pace against
+the account's budget:
+
+- **Default:** direct, stable connection (your own IP).
+- **`--proxy URL`:** a stable proxy — ideally residential, in the region the
+  account plausibly lives in. This is the reliability-preferred option.
+- **`--tor`:** a **single stable** Tor circuit (SOCKS5h port 9050), for anonymity
+  only. Less reliable than a residential IP (Tor exits are distrusted
+  datacenter IPs), but it no longer flips the compromise detector. Requires
+  `pip install -e ".[tor]"` (PySocks) and a running Tor daemon with
+  `SocksPort 9050`.
+
+> **Daemon vs Tor Browser:** `--tor` uses port **9050** — the **standalone `tor`
+> daemon**, which is what you want for an unattended long run
+> (`sudo apt install tor && sudo systemctl enable --now tor`). The **Tor Browser
+> Bundle** uses **9150/9151** instead; scounter does **not** target TBB, because
+> it would require keeping a browser open for the whole run. If you must use TBB,
+> set `SCOUNTER_TOR_SOCKS_PORT=9150`.
+
+Media files are always fetched **directly from the CDN** — CDN GETs carry no
+session cookie, aren't identity-bound, and aren't rate-limited, so they're fast
+and safe to fetch directly even under `--tor`/`--proxy`.
+
+Env var: `SCOUNTER_TOR_SOCKS_PORT` (default 9050).
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success (no errors) |
+| 2    | Completed with non-fatal errors |
+| 1    | Fatal failure |
+| 3    | Cookies expired/rejected — re-export and retry |
+| 130  | Interrupted (Ctrl+C) |
+
+## Project structure
+
+```
+scounter/
+├── __init__.py
+├── __main__.py        python -m scounter
+├── cli.py             argparse entry point (collect + link subcommands)
+├── auth.py            cookies-only login via instagrapi + expiry detection
+├── collector.py       engine: stories-first, enumerate→manifest, parallel HD download
+├── pacing.py          rate-based AIMD pacer (consecutive + total 429 budget)
+├── storage.py         SQLite manifest (media + child resources, cursor, seen, diff, lookups)
+├── reporter.py        JSON + Markdown report generation
+└── utils.py           logging, serialization, filenames, retry
+```
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+ruff check scounter
+mypy scounter
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Acknowledgements
+
+Powered by [`instagrapi`](https://github.com/subzeroid/instagrapi), the unofficial Instagram private-API wrapper.
